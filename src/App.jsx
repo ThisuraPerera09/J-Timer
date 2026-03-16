@@ -1,12 +1,5 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import "./App.css";
-
-const PRESETS = [
-  { label: "5 min", seconds: 300 },
-  { label: "10 min", seconds: 600 },
-  { label: "15 min", seconds: 900 },
-  { label: "30 min", seconds: 1800 },
-];
 
 function pad(n) {
   return String(n).padStart(2, "0");
@@ -21,52 +14,97 @@ function formatTime(secs) {
     : `${pad(m)}:${pad(s)}`;
 }
 
+function getSecondsUntil(timeStr) {
+  const [hours, minutes] = timeStr.split(":").map(Number);
+  const now = new Date();
+  const target = new Date();
+  target.setHours(hours, minutes, 0, 0);
+  // if time has already passed today, target tomorrow
+  if (target <= now) target.setDate(target.getDate() + 1);
+  return Math.round((target - now) / 1000);
+}
+
+function formatDateTimeDisplay(timeStr) {
+  const [hours, minutes] = timeStr.split(":").map(Number);
+  const ampm = hours >= 12 ? "PM" : "AM";
+  const h = hours % 12 || 12;
+  return `${h}:${pad(minutes)} ${ampm}`;
+}
+
 const MESSAGES = [
-  "Jayani... where are you? 😅",
-  "Still waiting... are you getting ready? ⏳",
-  "Time's up! Jayani is officially late! 💅",
-  "Ring ring! Jayani! 🔔",
-  "She's late again! Surprise surprise 😂",
-  "Your patience has expired 😤",
+  "Time to go, Jayani! 🏃‍♀️",
+  "He's waiting for you! Go go go! 💨",
+  "You're going to be late! Hurry up! ⏰",
+  "Final call! Time to leave! 🚗",
+  "Done! Now get out the door! 💅✨",
+  "Your date is waiting! Don't keep him waiting! 💕",
 ];
 
+// default input: 30 minutes from now
+function defaultTime() {
+  const d = new Date(Date.now() + 30 * 60 * 1000);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export default function App() {
-  const [inputMinutes, setInputMinutes] = useState(10);
-  const [inputSeconds, setInputSeconds] = useState(0);
+  const [dateTime, setDateTime] = useState(defaultTime);
   const [timeLeft, setTimeLeft] = useState(null);
   const [totalTime, setTotalTime] = useState(0);
   const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
   const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
   const intervalRef = useRef(null);
+  const timeLeftRef = useRef(0);
   const audioCtxRef = useRef(null);
+  const activeOscsRef = useRef([]);
   const alarmIntervalRef = useRef(null);
 
-  function playAlarm() {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      audioCtxRef.current = ctx;
+  function getCtx() {
+    if (!audioCtxRef.current || audioCtxRef.current.state === "closed") {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      audioCtxRef.current = new AudioCtx();
+    }
+    return audioCtxRef.current;
+  }
 
-      const beats = [0, 0.5, 1.0, 1.5, 2.0, 2.5];
-      beats.forEach((t) => {
+  // Gentle ascending chime: C5 → E5 → G5 → C6
+  const playChime = useCallback(() => {
+    try {
+      const ctx = getCtx();
+      const notes = [
+        { freq: 523.25, delay: 0.0  },  // C5
+        { freq: 659.25, delay: 0.38 },  // E5
+        { freq: 783.99, delay: 0.76 },  // G5
+        { freq: 1046.5, delay: 1.14 },  // C6
+      ];
+      notes.forEach(({ freq, delay }) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.connect(gain);
         gain.connect(ctx.destination);
         osc.type = "sine";
-        osc.frequency.setValueAtTime(880, ctx.currentTime + t);
-        gain.gain.setValueAtTime(0.6, ctx.currentTime + t);
-        gain.gain.exponentialRampToValueAndTime?.(0.001, ctx.currentTime + t + 0.4);
-        gain.gain.setValueAtTime(0.001, ctx.currentTime + t + 0.4);
-        osc.start(ctx.currentTime + t);
-        osc.stop(ctx.currentTime + t + 0.45);
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + delay);
+        // Bell envelope: instant attack, slow exponential decay
+        gain.gain.setValueAtTime(0, ctx.currentTime + delay);
+        gain.gain.linearRampToValueAtTime(0.45, ctx.currentTime + delay + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + 1.8);
+        osc.start(ctx.currentTime + delay);
+        osc.stop(ctx.currentTime + delay + 1.85);
+        activeOscsRef.current.push(osc);
+        osc.onended = () => {
+          activeOscsRef.current = activeOscsRef.current.filter((o) => o !== osc);
+        };
       });
-    } catch (_) {}
-  }
+    } catch { /* ignore */ }
+  }, []);
 
   function stopAlarm() {
     clearInterval(alarmIntervalRef.current);
     alarmIntervalRef.current = null;
+    // Force-stop every active oscillator immediately
+    activeOscsRef.current.forEach((osc) => { try { osc.stop(); } catch { /* ignore */ } });
+    activeOscsRef.current = [];
     if (audioCtxRef.current) {
       audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
@@ -74,11 +112,20 @@ export default function App() {
   }
 
   function handleStart() {
-    const total = inputMinutes * 60 + inputSeconds;
-    if (total <= 0) return;
+    if (!dateTime) {
+      setError("Please pick a date time first!");
+      return;
+    }
+    const total = getSecondsUntil(dateTime);
+    if (total <= 0) {
+      setError("That time has already passed!");
+      return;
+    }
+    setError("");
     clearInterval(intervalRef.current);
     setTotalTime(total);
     setTimeLeft(total);
+    timeLeftRef.current = total;
     setFinished(false);
     setMessage("");
     setRunning(true);
@@ -91,39 +138,37 @@ export default function App() {
     setFinished(false);
     setTimeLeft(null);
     setMessage("");
+    setError("");
   }
 
-  function handlePause() {
-    clearInterval(intervalRef.current);
-    setRunning(false);
-  }
-
-  function handleResume() {
-    if (timeLeft > 0) setRunning(true);
-  }
-
+  // Tick the countdown; all side-effects live in the interval callback (not in a state updater)
   useEffect(() => {
     if (!running) return;
-
     intervalRef.current = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) {
-          clearInterval(intervalRef.current);
-          setRunning(false);
-          setFinished(true);
-          setMessage(MESSAGES[Math.floor(Math.random() * MESSAGES.length)]);
-          playAlarm();
-          alarmIntervalRef.current = setInterval(playAlarm, 3200);
-          return 0;
-        }
-        return prev - 1;
-      });
+      timeLeftRef.current -= 1;
+      setTimeLeft(timeLeftRef.current);
+      if (timeLeftRef.current <= 0) {
+        clearInterval(intervalRef.current);
+        setRunning(false);
+        setFinished(true);
+        setMessage(MESSAGES[Math.floor(Math.random() * MESSAGES.length)]);
+      }
     }, 1000);
-
     return () => clearInterval(intervalRef.current);
   }, [running]);
 
-  const displayTime = timeLeft !== null ? timeLeft : inputMinutes * 60 + inputSeconds;
+  // Play alarm when finished; cleanup stops it automatically on reset
+  useEffect(() => {
+    if (!finished) return;
+    playChime();
+    alarmIntervalRef.current = setInterval(playChime, 3500);
+    return () => {
+      clearInterval(alarmIntervalRef.current);
+      alarmIntervalRef.current = null;
+    };
+  }, [finished, playChime]);
+
+  const displayTime = timeLeft !== null ? timeLeft : (dateTime ? getSecondsUntil(dateTime) : 0);
   const progress = totalTime > 0 ? (displayTime / totalTime) * 100 : 100;
   const radius = 110;
   const circumference = 2 * Math.PI * radius;
@@ -132,25 +177,30 @@ export default function App() {
   return (
     <div className={`app${finished ? " alarm-active" : ""}`}>
       <div className="card">
-        <h1 className="title">⏰ Jayani&apos;s Late Timer</h1>
-        <p className="subtitle">Track how long she&apos;s keeping you waiting 😏</p>
+        <h1 className="title">✨ Get Ready, Jayani!</h1>
+        <p className="subtitle">When is your date? I&apos;ll remind you when it&apos;s time! 💕</p>
 
-        {/* Preset buttons */}
-        <div className="presets">
-          {PRESETS.map((p) => (
-            <button
-              key={p.label}
-              className="preset-btn"
-              disabled={running}
-              onClick={() => {
-                setInputMinutes(Math.floor(p.seconds / 60));
-                setInputSeconds(0);
+        {/* Time picker */}
+        {!running && !finished && (
+          <div className="time-picker-wrapper">
+            <label className="time-label">📅 Date time</label>
+            <input
+              type="time"
+              className="time-picker"
+              value={dateTime}
+              onChange={(e) => {
+                setDateTime(e.target.value);
+                setError("");
               }}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
+            />
+            {dateTime && (
+              <p className="time-hint">
+                Your date is at <strong>{formatDateTimeDisplay(dateTime)}</strong>
+              </p>
+            )}
+            {error && <p className="time-error">{error}</p>}
+          </div>
+        )}
 
         {/* Circular progress ring */}
         <div className="ring-wrapper">
@@ -174,39 +224,15 @@ export default function App() {
             {finished ? (
               <span className="time-display ring-alarm">RING!</span>
             ) : (
-              <span className="time-display">{formatTime(displayTime)}</span>
+              <>
+                <span className="time-display">{formatTime(displayTime)}</span>
+                {running && dateTime && (
+                  <span className="ring-target">{formatDateTimeDisplay(dateTime)}</span>
+                )}
+              </>
             )}
           </div>
         </div>
-
-        {/* Manual input */}
-        {!running && !finished && (
-          <div className="inputs">
-            <div className="input-group">
-              <label>Min</label>
-              <input
-                type="number"
-                min="0"
-                max="99"
-                value={inputMinutes}
-                onChange={(e) => setInputMinutes(Math.max(0, parseInt(e.target.value) || 0))}
-              />
-            </div>
-            <span className="colon">:</span>
-            <div className="input-group">
-              <label>Sec</label>
-              <input
-                type="number"
-                min="0"
-                max="59"
-                value={inputSeconds}
-                onChange={(e) =>
-                  setInputSeconds(Math.min(59, Math.max(0, parseInt(e.target.value) || 0)))
-                }
-              />
-            </div>
-          </div>
-        )}
 
         {/* Alarm message */}
         {finished && <p className="alarm-msg">{message}</p>}
@@ -215,24 +241,17 @@ export default function App() {
         <div className="controls">
           {!running && !finished && (
             <button className="btn btn-start" onClick={handleStart}>
-              Start Timer
+              Start Countdown
             </button>
           )}
           {running && (
-            <>
-              <button className="btn btn-pause" onClick={handlePause}>Pause</button>
-              <button className="btn btn-reset" onClick={handleReset}>Reset</button>
-            </>
-          )}
-          {!running && !finished && timeLeft !== null && timeLeft > 0 && (
-            <>
-              <button className="btn btn-start" onClick={handleResume}>Resume</button>
-              <button className="btn btn-reset" onClick={handleReset}>Reset</button>
-            </>
+            <button className="btn btn-reset" onClick={handleReset}>
+              Cancel
+            </button>
           )}
           {finished && (
             <button className="btn btn-arrived" onClick={handleReset}>
-              She Arrived! ✅
+              I&apos;m Ready! ✅
             </button>
           )}
         </div>
